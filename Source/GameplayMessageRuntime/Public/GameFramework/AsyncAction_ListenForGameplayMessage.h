@@ -12,6 +12,7 @@
 
 class UScriptStruct;
 class UWorld;
+class AActor;
 struct FFrame;
 
 /**
@@ -33,9 +34,23 @@ public:
 	 * @param Channel			The message channel to listen for
 	 * @param PayloadType		The kind of message structure to use (this must match the same type that the sender is broadcasting)
 	 * @param MatchType			The rule used for matching the channel with broadcasted messages
+	 * @param bOnlyTriggerOnce	FirisGame：仅触发一次，触发后自动结束
 	 */
 	UFUNCTION(BlueprintCallable, Category = Messaging, meta = (WorldContext = "WorldContextObject", BlueprintInternalUseOnly = "true"))
-	static UE_API UAsyncAction_ListenForGameplayMessage* ListenForGameplayMessages(UObject* WorldContextObject, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch);
+	static UE_API UAsyncAction_ListenForGameplayMessage* ListenForGameplayMessages(UObject* WorldContextObject, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch, bool bOnlyTriggerOnce = false);
+
+	/**
+	 * FirisGame：异步等待指定 Target Actor 的定向频道消息（仅接收 BroadcastMessageTo(Target, Channel) 的消息，不接收全局广播）。
+	 * Target 结束（EndPlay）时自动停止监听。
+	 *
+	 * @param Target			定向频道的目标 Actor
+	 * @param Channel			The message channel to listen for
+	 * @param PayloadType		The kind of message structure to use (this must match the same type that the sender is broadcasting)
+	 * @param MatchType			The rule used for matching the channel with broadcasted messages
+	 * @param bOnlyTriggerOnce	仅触发一次，触发后自动结束
+	 */
+	UFUNCTION(BlueprintCallable, Category = Messaging, meta = (WorldContext = "WorldContextObject", BlueprintInternalUseOnly = "true", DisplayName = "Listen for Gameplay Messages On"))
+	static UE_API UAsyncAction_ListenForGameplayMessage* ListenForGameplayMessagesOn(UObject* WorldContextObject, AActor* Target, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch, bool bOnlyTriggerOnce = false);
 
 	/**
 	 * Attempt to copy the payload received from the broadcasted gameplay message into the specified wildcard.
@@ -67,6 +82,11 @@ private:
 	FGameplayTag ChannelToRegister;
 	TWeakObjectPtr<UScriptStruct> MessageStructType = nullptr;
 	EGameplayMessageMatch MessageMatchType = EGameplayMessageMatch::ExactMatch;
+
+	// FirisGame：定向频道目标与单次触发
+	TWeakObjectPtr<AActor> TargetPtr;
+	bool bTargeted = false;
+	bool bOnlyTriggerOnce = false;
 
 	FGameplayMessageListenerHandle ListenerHandle;
 };

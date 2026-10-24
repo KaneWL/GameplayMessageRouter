@@ -1,17 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+// FirisGame 扩展：在 Lyra 原版基础上增加“定向频道”（Target Actor + Tag），见 BroadcastMessageTo / RegisterTargetedListener。
 
 #pragma once
 
 #include "GameplayMessageTypes2.h"
 #include "GameplayTagContainer.h"
 #include "Subsystems/GameInstanceSubsystem.h"
+#include "UObject/ObjectKey.h"
 #include "UObject/WeakObjectPtr.h"
+#include "Engine/EngineTypes.h"
 
 #include "GameplayMessageSubsystem.generated.h"
 
 #define UE_API GAMEPLAYMESSAGERUNTIME_API
 
 class UGameplayMessageSubsystem;
+class AActor;
 struct FFrame;
 
 GAMEPLAYMESSAGERUNTIME_API DECLARE_LOG_CATEGORY_EXTERN(LogGameplayMessageSubsystem, Log, All);
@@ -34,6 +38,9 @@ public:
 
 	bool IsValid() const { return ID != 0; }
 
+	// FirisGame：是否为定向频道句柄
+	bool IsTargeted() const { return bTargeted; }
+
 private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UGameplayMessageSubsystem> Subsystem;
@@ -44,11 +51,19 @@ private:
 	UPROPERTY(Transient)
 	int32 ID = 0;
 
+	// FirisGame：定向频道的目标 Actor（bTargeted 为 true 时有效；Target 已销毁时句柄随 EndPlay 清理自动失效）
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AActor> Target;
+
+	UPROPERTY(Transient)
+	bool bTargeted = false;
+
 	FDelegateHandle StateClearedHandle;
 
 	friend UGameplayMessageSubsystem;
 
 	FGameplayMessageListenerHandle(UGameplayMessageSubsystem* InSubsystem, FGameplayTag InChannel, int32 InID) : Subsystem(InSubsystem), Channel(InChannel), ID(InID) {}
+	FGameplayMessageListenerHandle(UGameplayMessageSubsystem* InSubsystem, AActor* InTarget, FGameplayTag InChannel, int32 InID) : Subsystem(InSubsystem), Channel(InChannel), ID(InID), Target(InTarget), bTargeted(true) {}
 };
 
 /** 
@@ -200,6 +215,52 @@ public:
 	 */
 	UE_API void UnregisterListener(FGameplayMessageListenerHandle Handle);
 
+	// ------------------------------------------------------------------
+	// FirisGame 扩展：定向频道（Target Actor + Channel）
+	//  - BroadcastMessageTo 只派发给通过 RegisterTargetedListener 注册到同一 Target 的监听者，不派发给全局监听者
+	//  - Target 的 EndPlay 会自动清理其全部定向监听；也可用 UnregisterAllListenersForTarget 主动清理
+	// ------------------------------------------------------------------
+
+	/** 向指定 Target 的定向频道广播消息 */
+	template <typename FMessageStructType>
+	void BroadcastMessageTo(AActor* Target, FGameplayTag Channel, const FMessageStructType& Message)
+	{
+		const UScriptStruct* StructType = TBaseStructure<FMessageStructType>::Get();
+		BroadcastMessageToInternal(Target, Channel, StructType, &Message);
+	}
+
+	/** 监听指定 Target 的定向频道（TFunction 版本） */
+	template <typename FMessageStructType>
+	FGameplayMessageListenerHandle RegisterTargetedListener(AActor* Target, FGameplayTag Channel, TFunction<void(FGameplayTag, const FMessageStructType&)>&& Callback, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch)
+	{
+		auto ThunkCallback = [InnerCallback = MoveTemp(Callback)](FGameplayTag ActualTag, const UScriptStruct* SenderStructType, const void* SenderPayload)
+		{
+			InnerCallback(ActualTag, *reinterpret_cast<const FMessageStructType*>(SenderPayload));
+		};
+
+		const UScriptStruct* StructType = TBaseStructure<FMessageStructType>::Get();
+		return RegisterTargetedListenerInternal(Target, Channel, ThunkCallback, StructType, MatchType);
+	}
+
+	/** 监听指定 Target 的定向频道（成员函数版本，自动弱引用校验） */
+	template <typename FMessageStructType, typename TOwner = UObject>
+	FGameplayMessageListenerHandle RegisterTargetedListener(AActor* Target, FGameplayTag Channel, TOwner* Object, void(TOwner::* Function)(FGameplayTag, const FMessageStructType&), EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch)
+	{
+		TWeakObjectPtr<TOwner> WeakObject(Object);
+		return RegisterTargetedListener<FMessageStructType>(Target, Channel,
+			[WeakObject, Function](FGameplayTag InChannel, const FMessageStructType& Payload)
+			{
+				if (TOwner* StrongObject = WeakObject.Get())
+				{
+					(StrongObject->*Function)(InChannel, Payload);
+				}
+			}, MatchType);
+	}
+
+	/** 移除指定 Target 上的全部定向监听（业务上提前释放，例如单位撤退） */
+	UFUNCTION(BlueprintCallable, Category = Messaging, meta = (DisplayName = "Unregister All Listeners For Target"))
+	UE_API void UnregisterAllListenersForTarget(AActor* Target);
+
 protected:
 	/**
 	 * Broadcast a message on the specified channel
@@ -211,6 +272,12 @@ protected:
 	UE_API void K2_BroadcastMessage(FGameplayTag Channel, const int32& Message);
 
 	DECLARE_FUNCTION(execK2_BroadcastMessage);
+
+	/** FirisGame：向指定 Target 的定向频道广播消息（蓝图） */
+	UFUNCTION(BlueprintCallable, CustomThunk, Category=Messaging, meta=(CustomStructureParam="Message", AllowAbstract="false", DisplayName="Broadcast Message To"))
+	UE_API void K2_BroadcastMessageTo(AActor* Target, FGameplayTag Channel, const int32& Message);
+
+	DECLARE_FUNCTION(execK2_BroadcastMessageTo);
 
 private:
 	// Internal helper for broadcasting a message
@@ -225,6 +292,21 @@ private:
 
 	UE_API void UnregisterListenerInternal(FGameplayTag Channel, int32 HandleID);
 
+	// FirisGame：定向频道内部实现
+	UE_API void BroadcastMessageToInternal(AActor* Target, FGameplayTag Channel, const UScriptStruct* StructType, const void* MessageBytes);
+
+	UE_API FGameplayMessageListenerHandle RegisterTargetedListenerInternal(
+		AActor* Target,
+		FGameplayTag Channel,
+		TFunction<void(FGameplayTag, const UScriptStruct*, const void*)>&& Callback,
+		const UScriptStruct* StructType,
+		EGameplayMessageMatch MatchType);
+
+	UE_API void UnregisterTargetedListenerInternal(AActor* Target, FGameplayTag Channel, int32 HandleID);
+
+	UFUNCTION()
+	void HandleTargetEndPlay(AActor* Actor, EEndPlayReason::Type EndPlayReason);
+
 private:
 	// List of all entries for a given channel
 	struct FChannelListenerList
@@ -233,8 +315,23 @@ private:
 		int32 HandleID = 0;
 	};
 
+	using FChannelMap = TMap<FGameplayTag, FChannelListenerList>;
+
+	// 公共派发逻辑：沿 Channel 父链查找监听表并回调；FindList 每次重新查找以容忍回调期间的增删
+	void DispatchMessage(TFunctionRef<FChannelListenerList*(FGameplayTag)> FindList, TFunctionRef<void(FGameplayTag, int32)> RemoveInvalidListener,
+		FGameplayTag Channel, const UScriptStruct* StructType, const void* MessageBytes);
+
+	void LogBroadcast(const AActor* Target, FGameplayTag Channel, const UScriptStruct* StructType, const void* MessageBytes) const;
+
+	static void RemoveListenerFromChannelMap(FChannelMap& Map, FGameplayTag Channel, int32 HandleID);
+
+	void RemoveTargetEntry(AActor* Target);
+
 private:
-	TMap<FGameplayTag, FChannelListenerList> ListenerMap;
+	FChannelMap ListenerMap;
+
+	// FirisGame：按 Target Actor 分组的定向监听表
+	TMap<TObjectKey<AActor>, FChannelMap> TargetedListenerMap;
 };
 
 #undef UE_API
