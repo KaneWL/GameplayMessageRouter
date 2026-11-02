@@ -8,6 +8,7 @@
 #include "GameFramework/GameplayMessageSubsystem.h"
 #include "UObject/ScriptMacros.h"
 #include "UObject/Stack.h"
+#include "UObject/UnrealType.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(AsyncAction_ListenForGameplayMessage)
 
@@ -52,6 +53,41 @@ UAsyncAction_ListenForGameplayMessage* UAsyncAction_ListenForGameplayMessage::Li
 	Action->bTargeted = true;
 	Action->bOnlyTriggerOnce = bOnlyTriggerOnce;
 	Action->RegisterWithGameInstance(World);
+
+	return Action;
+}
+
+UAsyncAction_ListenForGameplayMessage* UAsyncAction_ListenForGameplayMessage::ListenWithFunction(UObject* WorldContextObject, UObject* Owner, FName FunctionName, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType)
+{
+	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	if (!World || !UGameplayMessageSubsystem::HasInstance(World))
+	{
+		return nullptr;
+	}
+	if (!IsValid(Owner) || Owner->FindFunction(FunctionName) == nullptr)
+	{
+		UE_LOG(LogGameplayMessageSubsystem, Warning, TEXT("ListenWithFunction(%s): Owner 无效或找不到函数 %s"), *Channel.ToString(), *FunctionName.ToString());
+		return nullptr;
+	}
+
+	UAsyncAction_ListenForGameplayMessage* Action = NewObject<UAsyncAction_ListenForGameplayMessage>();
+	Action->WorldPtr = World;
+	Action->ChannelToRegister = Channel;
+	Action->MessageStructType = PayloadType;
+	Action->MessageMatchType = MatchType;
+	Action->OwnerPtr = Owner;
+	Action->OwnerFunctionName = FunctionName;
+	Action->RegisterWithGameInstance(World);
+
+	TWeakObjectPtr<UAsyncAction_ListenForGameplayMessage> WeakThis(Action);
+	Action->ListenerHandle = UGameplayMessageSubsystem::Get(World).RegisterListenerInternal(Channel,
+		[WeakThis](FGameplayTag Tag, const UScriptStruct* StructType, const void* Payload)
+		{
+			if (UAsyncAction_ListenForGameplayMessage* StrongThis = WeakThis.Get())
+			{
+				StrongThis->InvokeOwnerFunction(Tag, StructType, Payload);
+			}
+		}, PayloadType, MatchType);
 
 	return Action;
 }
@@ -152,6 +188,47 @@ void UAsyncAction_ListenForGameplayMessage::HandleMessageReceived(FGameplayTag C
 	{
 		// 单次触发后自动注销
 		SetReadyToDestroy();
+	}
+}
+
+void UAsyncAction_ListenForGameplayMessage::InvokeOwnerFunction(FGameplayTag Channel, const UScriptStruct* StructType, const void* Payload)
+{
+	UObject* Owner = OwnerPtr.Get();
+	if (Owner == nullptr)
+	{
+		SetReadyToDestroy();
+		return;
+	}
+	UFunction* Func = Owner->FindFunction(OwnerFunctionName);
+	if (Func == nullptr)
+	{
+		return;
+	}
+
+	TArray<uint8> Params;
+	Params.SetNumZeroed(Func->ParmsSize);
+	for (TFieldIterator<FProperty> It(Func); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+	{
+		It->InitializeValue_InContainer(Params.GetData());
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(*It))
+		{
+			void* Dest = StructProp->ContainerPtrToValuePtr<void>(Params.GetData());
+			if (StructProp->Struct == FGameplayTag::StaticStruct())
+			{
+				StructProp->CopyCompleteValue(Dest, &Channel);
+			}
+			else if (StructProp->Struct == StructType && Payload != nullptr)
+			{
+				StructProp->CopyCompleteValue(Dest, Payload);
+			}
+		}
+	}
+
+	Owner->ProcessEvent(Func, Params.GetData());
+
+	for (TFieldIterator<FProperty> It(Func); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+	{
+		It->DestroyValue_InContainer(Params.GetData());
 	}
 }
 

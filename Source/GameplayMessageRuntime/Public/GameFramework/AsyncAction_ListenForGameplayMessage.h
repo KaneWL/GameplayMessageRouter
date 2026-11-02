@@ -52,6 +52,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = Messaging, meta = (WorldContext = "WorldContextObject", BlueprintInternalUseOnly = "true", DisplayName = "Listen for Gameplay Messages On"))
 	static UE_API UAsyncAction_ListenForGameplayMessage* ListenForGameplayMessagesOn(UObject* WorldContextObject, AActor* Target, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch, bool bOnlyTriggerOnce = false);
 
+    /**
+	 * FirisGame：按函数名监听（供 C# / 蓝图使用）。收到消息后直接调用 Owner 上名为 FunctionName 的 UFunction。
+	 * 回调参数按类型匹配：FGameplayTag → 频道，PayloadType → 载荷，其余参数保持默认值。
+	 * 调用即生效，无需 Activate；停止监听调用 Cancel()。
+	 */
+	UFUNCTION(BlueprintCallable, Category = Messaging, meta = (WorldContext = "WorldContextObject"))
+	static UE_API UAsyncAction_ListenForGameplayMessage* ListenWithFunction(UObject* WorldContextObject, UObject* Owner, FName FunctionName, FGameplayTag Channel, UScriptStruct* PayloadType, EGameplayMessageMatch MatchType = EGameplayMessageMatch::ExactMatch);
+
 	/**
 	 * Attempt to copy the payload received from the broadcasted gameplay message into the specified wildcard.
 	 * The wildcard's type must match the type from the received message.
@@ -75,6 +83,9 @@ public:
 private:
 	void HandleMessageReceived(FGameplayTag Channel, const UScriptStruct* StructType, const void* Payload);
 
+	// FirisGame：ListenWithFunction 的消息处理，把载荷作为参数调用 Owner 的 UFunction
+	void InvokeOwnerFunction(FGameplayTag Channel, const UScriptStruct* StructType, const void* Payload);
+
 private:
 	const void* ReceivedMessagePayloadPtr = nullptr;
 
@@ -87,6 +98,10 @@ private:
 	TWeakObjectPtr<AActor> TargetPtr;
 	bool bTargeted = false;
 	bool bOnlyTriggerOnce = false;
+
+	// FirisGame：ListenWithFunction 的目标对象与函数名
+	TWeakObjectPtr<UObject> OwnerPtr;
+	FName OwnerFunctionName;
 
 	FGameplayMessageListenerHandle ListenerHandle;
 };
